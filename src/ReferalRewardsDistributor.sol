@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 /**
  * @title ReferalRewardsDistributor
@@ -18,6 +19,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
  */
 contract ReferalRewardsDistributor is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using MerkleProof for bytes32[];
 
     struct Campaign {
         address token; // token address
@@ -153,8 +155,8 @@ contract ReferalRewardsDistributor is Ownable, ReentrancyGuard {
         require(amount > 0, "zero amount");
 
         // verify merkle proof (standard leaf: keccak256(abi.encodePacked(index, account, amount)))
-        bytes32 node = keccak256(abi.encodePacked(index, account, amount));
-        require(verifyProof(merkleProof, c.merkleRoot, node), "invalid proof");
+        bytes32 leaf = keccak256(abi.encodePacked(index, account, amount));
+        require(merkleProof.verify(c.merkleRoot, leaf), "invalid proof");
 
         // mark claimed
         _setClaimed(campaignId, index);
