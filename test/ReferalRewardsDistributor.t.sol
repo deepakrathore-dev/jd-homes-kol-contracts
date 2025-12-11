@@ -239,6 +239,22 @@ contract ReferalRewardsDistributorTest is Test {
         distributor.claim(campaignId, 0, user1, 100e18, invalidProof);
     }
 
+    function test_User_ClaimRevert_InvalidAddress() public {
+        uint256 campaignId =
+            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
+
+        token.mint(owner, TOTAL_ALLOCATION);
+        token.approve(address(distributor), TOTAL_ALLOCATION);
+        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
+
+        // Try to claim with invalid proof
+        bytes32[] memory proof = MerkleHelper.generateProof(leaves, 1);
+        address maliciousUser = address(0x4);
+        vm.prank(user1);
+        vm.expectRevert("invalid proof");
+        distributor.claim(campaignId, 1, maliciousUser, 200e18, proof);
+    }
+
     function test_User_ClaimRevert_AlreadyClaimed() public {
         uint256 campaignId =
             distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);

@@ -5,10 +5,12 @@ import {ReferalRewardsDistributor} from "../src/ReferalRewardsDistributor.sol";
 
 contract ReferalRewardsDistributorScript is Script {
     ReferalRewardsDistributor public distributor;
+
     function setUp() public {}
 
     function run() public {
-        vm.startBroadcast();
+        uint256 deployerPk = vm.envUint("DEPLOYER_PRIVATE_KEY");
+        vm.startBroadcast(deployerPk);
         distributor = new ReferalRewardsDistributor();
         vm.stopBroadcast();
     }
