@@ -10,31 +10,25 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 /**
  * @title ReferalRewardsDistributor
  * @notice
- *  - Admin can register multiple properties (assets) and for each property add multiple merkle root campaigns (root sets).
- *  - Each merkle-root campaign specifies the token to be used, an optional expiry timestamp, and an expected total allocation.
- *  - Admin funds campaigns by transferring ERC20 tokens to the contract (or contract accepts native ETH when token == address(0)).
- *  - Users claim by providing (propertyId, rootId, index, account, amount, merkleProof).
- *  - Claimed bitmap per property/root prevents double claims.
- *  - Admin can withdraw unclaimed funds after expiry.
+ *  - Admin can register multiple campaigns.
+ *  - Strictly for ERC20 tokens .
+ *  - Includes two function to create campaigns, function createCampaign and fundCampaign for create and fund later one for combined "createAndFundCampaign" function for efficiency.
  */
 contract ReferalRewardsDistributor is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using MerkleProof for bytes32[];
 
     struct Campaign {
-        address token; // token address
-        bytes32 merkleRoot; // merkle root
-        uint256 totalAllocation; // total allocated amount expected
-        uint256 totalFunded; // total funded so far
-        uint256 totalClaimed; // total claimed so far
-        uint256 expiry; // unix timestamp, 0 = no expiry
-        bool active; // whether campaign is active (claims allowed)
+        address token; // ERC20 token address
+        bytes32 merkleRoot; // Merkle root
+        uint256 totalAllocation; // Expected total allocation
+        uint256 totalFunded; // Actual funded amount
+        uint256 totalClaimed; // Amount claimed
+        uint256 expiry; // Timestamp (0 = no expiry)
+        bool active; // Is campaign open for claims
     }
 
-    // propertyId => list of campaign ids
-    mapping(uint256 => uint256[]) public propertyCampaigns;
-
-    // global campaign id => Campaign
+    // Campaign ID starts at 1
     mapping(uint256 => Campaign) public campaigns;
     uint256 public nextCampaignId;
 
@@ -42,12 +36,7 @@ contract ReferalRewardsDistributor is Ownable, ReentrancyGuard {
     mapping(uint256 => mapping(uint256 => uint256)) private claimedBitMap;
 
     event CampaignCreated(
-        uint256 indexed propertyId,
-        uint256 indexed campaignId,
-        address token,
-        bytes32 merkleRoot,
-        uint256 totalAllocation,
-        uint256 expiry
+        uint256 indexed campaignId, address token, bytes32 merkleRoot, uint256 totalAllocation, uint256 expiry
     );
     event CampaignFunded(uint256 indexed campaignId, address indexed token, uint256 amount, uint256 totalFunded);
     event Claimed(uint256 indexed campaignId, uint256 indexed index, address indexed account, uint256 amount);
@@ -55,30 +44,21 @@ contract ReferalRewardsDistributor is Ownable, ReentrancyGuard {
     event UnclaimedWithdrawn(uint256 indexed campaignId, address indexed to, uint256 amount);
 
     constructor() Ownable(msg.sender) {
-        nextCampaignId = 1; // start ids at 1
+        nextCampaignId = 1;
     }
 
     /* ========== ADMIN ACTIONS ========== */
 
     /**
-     * @notice Create a new merkle campaign for a property.
-     * @param propertyId asset/property identifier
-     * @param token token address (0x0 for native ETH)
-     * @param merkleRoot merkle root for claims
-     * @param totalAllocation expected total amount allocated for this campaign (informational but useful to check funding)
-     * @param expiry unix timestamp after which admin may withdraw unclaimed funds (0 = no expiry)
-     * @param active whether to enable claims immediately
-     * @return campaignId created campaign id
+     * @notice Create a campaign without funding it yet.
      */
-    function createCampaign(
-        uint256 propertyId,
-        address token,
-        bytes32 merkleRoot,
-        uint256 totalAllocation,
-        uint256 expiry,
-        bool active
-    ) external onlyOwner returns (uint256) {
-        require(merkleRoot != bytes32(0), "zero merkle root");
+    function createCampaign(address token, bytes32 merkleRoot, uint256 totalAllocation, uint256 expiry)
+        public
+        onlyOwner
+        returns (uint256)
+    {
+        require(token != address(0), "Invalid token address");
+        require(merkleRoot != bytes32(0), "Zero merkle root");
 
         uint256 id = nextCampaignId++;
         campaigns[id] = Campaign({
@@ -88,156 +68,161 @@ contract ReferalRewardsDistributor is Ownable, ReentrancyGuard {
             totalFunded: 0,
             totalClaimed: 0,
             expiry: expiry,
-            active: active
+            active: false
         });
 
-        propertyCampaigns[propertyId].push(id);
-
-        emit CampaignCreated(propertyId, id, token, merkleRoot, totalAllocation, expiry);
+        emit CampaignCreated(id, token, merkleRoot, totalAllocation, expiry);
         return id;
     }
 
     /**
-     * @notice Fund campaign with ERC20 tokens (must have prior approve) or send native ETH via payable
-     * @param campaignId campaign to fund
-     * @param amount amount to fund
+     * @notice Fund an existing campaign.
+     * @dev Requires prior ERC20 approval.
      */
-    function fundCampaign(uint256 campaignId, uint256 amount) external payable onlyOwner nonReentrant {
+    function fundCampaign(uint256 campaignId, uint256 amount) public onlyOwner nonReentrant {
         Campaign storage c = campaigns[campaignId];
-        require(c.merkleRoot != bytes32(0), "campaign not exists");
-        require(amount > 0, "zero amount");
+        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
+        require(amount > 0, "Zero amount");
 
-        require(msg.value == 0, "do not send ETH");
+        // Transfer tokens from admin to contract
         IERC20(c.token).safeTransferFrom(msg.sender, address(this), amount);
+
         c.totalFunded += amount;
+        c.active = true; // Auto-activate on funding
+
         emit CampaignFunded(campaignId, c.token, amount, c.totalFunded);
     }
 
     /**
-     * @notice Activate or deactivate claims for a campaign
+     * @notice COMBINED APPROACH: Create and Fund in one call.
+     * @dev This is the efficient approach. Requires prior ERC20 approval.
      */
-    function setCampaignActive(uint256 campaignId, bool active) external onlyOwner {
+    function createAndFundCampaign(
+        address token,
+        bytes32 merkleRoot,
+        uint256 totalAllocation,
+        uint256 expiry,
+        uint256 fundingAmount
+    ) external onlyOwner returns (uint256) {
+        // 1. Create
+        uint256 id = createCampaign(token, merkleRoot, totalAllocation, expiry);
+
+        // 2. Fund
+        fundCampaign(id, fundingAmount);
+
+        return id;
+    }
+
+    /**
+     * @notice Manually toggle campaign status.
+     */
+    function updateCampaignStatus(uint256 campaignId, bool active) external onlyOwner {
         Campaign storage c = campaigns[campaignId];
-        require(c.merkleRoot != bytes32(0), "campaign not exists");
+        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
         c.active = active;
         if (!active) emit CampaignClosed(campaignId);
     }
 
     /**
-     * @notice Update merkle root if you need to rotate the tree for a campaign.
-     * WARNING: rotating root does NOT preserve claimed bitmap; use carefully.
+     * @notice Update merkle root.
+     * WARNING: Does NOT reset claimed bitmap.
      */
     function updateMerkleRoot(uint256 campaignId, bytes32 newRoot) external onlyOwner {
         Campaign storage c = campaigns[campaignId];
-        require(c.merkleRoot != bytes32(0), "campaign not exists");
-        require(newRoot != bytes32(0), "zero root");
+        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
+        require(newRoot != bytes32(0), "Zero root");
         c.merkleRoot = newRoot;
     }
 
     /* ========== USER ACTIONS ========== */
 
     /**
-     * @notice Claim tokens for a given campaign
-     * @param campaignId campaign id
-     * @param index leaf index (used in leaf hash)
-     * @param account claimant address (allows claiming on behalf)
-     * @param amount amount allocated in leaf
-     * @param merkleProof array of proof bytes32
+     * @notice Claim tokens.
      */
     function claim(uint256 campaignId, uint256 index, address account, uint256 amount, bytes32[] calldata merkleProof)
         external
         nonReentrant
     {
         Campaign storage c = campaigns[campaignId];
-        require(c.merkleRoot != bytes32(0), "campaign not exists");
-        require(c.active, "campaign not active");
-        require(!isClaimed(campaignId, index), "already claimed");
-        require(amount > 0, "zero amount");
+        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
+        require(c.active, "Campaign not active");
+        require(!isClaimed(campaignId, index), "Already claimed");
+        require(amount > 0, "Zero amount");
 
-        // verify merkle proof (standard leaf: keccak256(abi.encodePacked(index, account, amount)))
-        bytes32 leaf = keccak256(abi.encodePacked(index, account, amount));
-        require(merkleProof.verify(c.merkleRoot, leaf), "invalid proof");
+        // Verify Merkle Proof
+        bytes32 node = keccak256(abi.encodePacked(index, account, amount));
+        require(merkleProof.verify(c.merkleRoot, node), "Invalid proof");
 
-        // mark claimed
+        // Mark as claimed
         _setClaimed(campaignId, index);
 
+        // Update stats
         c.totalClaimed += amount;
 
+        // Transfer tokens
         IERC20(c.token).safeTransfer(account, amount);
 
         emit Claimed(campaignId, index, account, amount);
     }
 
-    /**
-     * @notice Check whether the given index was already claimed
-     */
+    /* ========== INTERNAL & VIEW HELPERS ========== */
+
     function isClaimed(uint256 campaignId, uint256 index) public view returns (bool) {
         uint256 wordIndex = index / 256;
         uint256 bitIndex = index % 256;
         uint256 word = claimedBitMap[campaignId][wordIndex];
-        uint256 mask = (1 << bitIndex);
-        return (word & mask) != 0;
+        return (word & (uint256(1) << bitIndex)) != 0;
     }
 
     function _setClaimed(uint256 campaignId, uint256 index) private {
         uint256 wordIndex = index / 256;
         uint256 bitIndex = index % 256;
-        claimedBitMap[campaignId][wordIndex] |= (1 << bitIndex);
+        claimedBitMap[campaignId][wordIndex] |= (uint256(1) << bitIndex);
+    }
+
+    /**
+     * @notice Returns all campaigns.
+     * @dev starting from ID 1
+     */
+    function getAllCampaigns() external view returns (Campaign[] memory) {
+        uint256 count = nextCampaignId - 1;
+        Campaign[] memory result = new Campaign[](count);
+
+        // Map ID 1 -> Array Index 0
+        for (uint256 i = 1; i <= count; i++) {
+            result[i - 1] = campaigns[i];
+        }
+
+        return result;
     }
 
     /* ========== ADMIN WITHDRAWALS ========== */
 
     /**
-     * @notice Withdraw unclaimed funds from a campaign after expiry (or when owner deactivates and chooses to withdraw).
-     * @param campaignId campaign to withdraw from
-     * @param to recipient
-     * @param amount amount to withdraw
+     * @notice Withdraw unclaimed funds after expiry.
      */
     function withdrawUnclaimed(uint256 campaignId, address to, uint256 amount) external onlyOwner nonReentrant {
         Campaign storage c = campaigns[campaignId];
-        require(c.merkleRoot != bytes32(0), "campaign not exists");
-        require(amount > 0, "zero amount");
-        // allow only if expired (if expiry set) or if owner explicitly closed campaign
-        require(c.expiry != 0 ? block.timestamp > c.expiry : true, "campaign not expired");
+        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
+
+        // Allow withdrawal if expired OR if admin manually set active = false
+        if (c.active) {
+            require(c.expiry != 0 && block.timestamp > c.expiry, "Campaign active and not expired");
+        }
 
         uint256 available = c.totalFunded - c.totalClaimed;
-        require(available >= amount, "insufficient unclaimed balance");
+        require(available >= amount, "Insufficient unclaimed balance");
 
         c.totalFunded -= amount;
-
         IERC20(c.token).safeTransfer(to, amount);
 
         emit UnclaimedWithdrawn(campaignId, to, amount);
     }
 
-    /* ========== HELPERS ========== */
-
     /**
-     * @notice Merkle proof verify (calldata proof)
+     * @notice Emergency recover any ERC20 (including campaign tokens if absolutely needed).
      */
-    function verifyProof(bytes32[] calldata proof, bytes32 root, bytes32 leaf) public pure returns (bool) {
-        bytes32 computedHash = leaf;
-        for (uint256 i = 0; i < proof.length; i++) {
-            bytes32 proofElement = proof[i];
-
-            if (computedHash <= proofElement) {
-                // Hash(current computed hash + current element of the proof)
-                computedHash = keccak256(abi.encodePacked(computedHash, proofElement));
-            } else {
-                // Hash(current element of the proof + current computed hash)
-                computedHash = keccak256(abi.encodePacked(proofElement, computedHash));
-            }
-        }
-        return computedHash == root;
+    function emergencyRecoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
+        IERC20(tokenAddress).safeTransfer(owner(), tokenAmount);
     }
-
-    /* ========== VIEW HELPERS ========== */
-    function getPropertyCampaigns(uint256 propertyId) external view returns (uint256[] memory) {
-        return propertyCampaigns[propertyId];
-    }
-
-    // receive to accept native ETH funding
-    receive() external payable {}
-
-    fallback() external payable {}
 }

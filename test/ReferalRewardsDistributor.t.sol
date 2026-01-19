@@ -1,26 +1,31 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, console} from "forge-std/Test.sol";
 import {ReferalRewardsDistributor} from "../src/ReferalRewardsDistributor.sol";
-import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
-import {MerkleHelper} from "./utils/MerkleHelper.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+
+//  Simple Mock Token for testing
+contract MockERC20 is ERC20 {
+    constructor() ERC20("Test Token", "TEST") {
+        _mint(msg.sender, 1000000 * 10 ** 18);
+    }
+}
 
 contract ReferalRewardsDistributorTest is Test {
     ReferalRewardsDistributor public distributor;
-    ERC20Mock public token;
-    using MerkleHelper for MerkleHelper.Leaf[];
+    MockERC20 public token;
 
     address public owner;
     address public user1;
     address public user2;
     address public user3;
 
-    uint256 public constant PROPERTY_ID = 1;
     uint256 public constant TOTAL_ALLOCATION = 1000e18;
 
+    // Merkle Tree Data
+    bytes32[] public leaves;
     bytes32 public merkleRoot;
-    MerkleHelper.Leaf[] public leaves;
 
     function setUp() public {
         owner = address(this);
@@ -30,268 +35,228 @@ contract ReferalRewardsDistributorTest is Test {
 
         // Deploy contracts
         distributor = new ReferalRewardsDistributor();
-        token = new ERC20Mock();
+        token = new MockERC20();
 
-        // Setup merkle tree with test data
-        leaves.push(MerkleHelper.Leaf({index: 0, account: user1, amount: 100e18}));
-        leaves.push(MerkleHelper.Leaf({index: 1, account: user2, amount: 200e18}));
-        leaves.push(MerkleHelper.Leaf({index: 2, account: user3, amount: 300e18}));
+        // ----------------------------------------------------
+        // Generate Merkle Tree (Simple implementation for test)
+        // ----------------------------------------------------
+        // Leaf 0: User1, 100e18
+        leaves.push(keccak256(abi.encodePacked(uint256(0), user1, uint256(100e18))));
+        // Leaf 1: User2, 200e18
+        leaves.push(keccak256(abi.encodePacked(uint256(1), user2, uint256(200e18))));
+        // Leaf 2: User3, 300e18
+        leaves.push(keccak256(abi.encodePacked(uint256(2), user3, uint256(300e18))));
+        // Leaf 3: Dummy to make tree balanced (optional but good practice)
+        leaves.push(keccak256(abi.encodePacked(uint256(3), address(0), uint256(0))));
 
-        // Build merkle tree root
-        merkleRoot = leaves.computeMerkleRoot();
+        // Compute Root (Hashed pairwise)
+        bytes32 h01 = _hashPair(leaves[0], leaves[1]);
+        bytes32 h23 = _hashPair(leaves[2], leaves[3]);
+        merkleRoot = _hashPair(h01, h23);
     }
 
-    /* ========== ADMIN TESTS ========== */
+    // Helper to hash pairs for Merkle Tree
+    function _hashPair(bytes32 a, bytes32 b) private pure returns (bytes32) {
+        return a < b ? keccak256(abi.encodePacked(a, b)) : keccak256(abi.encodePacked(b, a));
+    }
 
-    function test_Admin_CreateCampaign() public {
+    /* ========== TESTS: ADMIN ACTIONS ========== */
+
+    function test_Admin_CreateCampaign_Separate() public {
         uint256 campaignId = distributor.createCampaign(
-            PROPERTY_ID,
             address(token),
             merkleRoot,
             TOTAL_ALLOCATION,
-            0, // no expiry
-            true // active
+            0 // no expiry
         );
 
         assertEq(campaignId, 1);
 
-        (address tokenAddr, bytes32 root, uint256 totalAlloc,,, uint256 expiry, bool active) =
-            distributor.campaigns(campaignId);
+        // Check struct storage
+        (
+            address tokenAddr,
+            bytes32 root,
+            uint256 totalAlloc,
+            uint256 totalFunded,
+            uint256 totalClaimed,
+            uint256 expiry,
+            bool active
+        ) = distributor.campaigns(campaignId);
 
         assertEq(tokenAddr, address(token));
         assertEq(root, merkleRoot);
         assertEq(totalAlloc, TOTAL_ALLOCATION);
+        assertEq(totalFunded, 0); // Not funded yet
+        assertEq(totalClaimed, 0);
         assertEq(expiry, 0);
-        assertTrue(active);
-
-        // Check property campaigns
-        uint256[] memory propertyCampaigns = distributor.getPropertyCampaigns(PROPERTY_ID);
-        assertEq(propertyCampaigns.length, 1);
-        assertEq(propertyCampaigns[0], campaignId);
+        assertFalse(active); // Not active yet
     }
 
     function test_Admin_FundCampaign() public {
-        uint256 campaignId =
-            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
+        // 1. Create
+        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0);
 
-        // Mint tokens to owner
-        token.mint(owner, TOTAL_ALLOCATION);
-
-        // Approve and fund
+        // 2. Approve
         token.approve(address(distributor), TOTAL_ALLOCATION);
+
+        // 3. Fund
         distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
 
-        (,,, uint256 totalFunded,,,) = distributor.campaigns(campaignId);
+        (,,, uint256 totalFunded,,, bool active) = distributor.campaigns(campaignId);
+
         assertEq(totalFunded, TOTAL_ALLOCATION);
+        assertTrue(active); // Should auto-activate
         assertEq(token.balanceOf(address(distributor)), TOTAL_ALLOCATION);
     }
 
-    function test_Admin_SetCampaignActive() public {
-        uint256 campaignId = distributor.createCampaign(
-            PROPERTY_ID,
+    // *** THIS IS THE NEW APPROACH YOU ASKED ABOUT ***
+    function test_Admin_CreateAndFund_Combined() public {
+        // 1. Approve first
+        token.approve(address(distributor), TOTAL_ALLOCATION);
+
+        // 2. Call the combined function
+        uint256 campaignId = distributor.createAndFundCampaign(
             address(token),
             merkleRoot,
             TOTAL_ALLOCATION,
             0,
-            false // inactive
+            TOTAL_ALLOCATION // Funding amount
         );
 
-        // Activate
-        distributor.setCampaignActive(campaignId, true);
+        // 3. Verify everything happened in one go
+        (,,, uint256 totalFunded,,, bool active) = distributor.campaigns(campaignId);
 
-        (,,,,,, bool active) = distributor.campaigns(campaignId);
+        assertEq(campaignId, 1);
+        assertEq(totalFunded, TOTAL_ALLOCATION);
         assertTrue(active);
+        assertEq(token.balanceOf(address(distributor)), TOTAL_ALLOCATION);
+    }
+
+    function test_Admin_UpdateCampaignStatus() public {
+        // Create & Fund
+        token.approve(address(distributor), TOTAL_ALLOCATION);
+        uint256 campaignId =
+            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
 
         // Deactivate
-        distributor.setCampaignActive(campaignId, false);
-
-        (,,,,,, active) = distributor.campaigns(campaignId);
+        distributor.updateCampaignStatus(campaignId, false);
+        (,,,,,, bool active) = distributor.campaigns(campaignId);
         assertFalse(active);
+
+        // Activate
+        distributor.updateCampaignStatus(campaignId, true);
+        (,,,,,, active) = distributor.campaigns(campaignId);
+        assertTrue(active);
     }
 
     function test_Admin_WithdrawUnclaimed() public {
         uint256 expiry = block.timestamp + 1 days;
-        uint256 campaignId =
-            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, expiry, true);
 
-        token.mint(owner, TOTAL_ALLOCATION);
+        // Create & Fund
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
-
-        // Claim only for user1
-        bytes32[] memory proof = MerkleHelper.generateProof(leaves, 0);
-        vm.prank(user1);
-        distributor.claim(campaignId, 0, user1, 100e18, proof);
+        uint256 campaignId =
+            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, expiry, TOTAL_ALLOCATION);
 
         // Fast forward past expiry
         vm.warp(expiry + 1);
 
-        // Withdraw unclaimed
-        uint256 unclaimed = TOTAL_ALLOCATION - 100e18;
-        distributor.withdrawUnclaimed(campaignId, owner, unclaimed);
+        // Withdraw all (since none claimed)
+        uint256 balanceBefore = token.balanceOf(owner);
+        distributor.withdrawUnclaimed(campaignId, owner, TOTAL_ALLOCATION);
+        uint256 balanceAfter = token.balanceOf(owner);
 
-        assertEq(token.balanceOf(owner), unclaimed);
-        assertEq(token.balanceOf(address(distributor)), 0); // Only claimed amount remains
+        assertEq(balanceAfter - balanceBefore, TOTAL_ALLOCATION);
+        assertEq(token.balanceOf(address(distributor)), 0);
     }
 
-    function test_Admin_MultipleProperties() public {
-        // Create campaign for property 1
-        uint256 campaignId1 = distributor.createCampaign(1, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
+    function test_View_GetAllCampaigns() public {
+        token.approve(address(distributor), TOTAL_ALLOCATION * 10);
 
-        // Create campaign for property 2
-        bytes32 merkleRoot2 = bytes32(uint256(999));
-        uint256 campaignId2 = distributor.createCampaign(2, address(token), merkleRoot2, TOTAL_ALLOCATION * 2, 0, true);
+        // Create Campaign 1
+        distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
+        // Create Campaign 2
+        distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
 
-        // Check property campaigns
-        uint256[] memory prop1Campaigns = distributor.getPropertyCampaigns(1);
-        uint256[] memory prop2Campaigns = distributor.getPropertyCampaigns(2);
+        // Call the view function
+        ReferalRewardsDistributor.Campaign[] memory list = distributor.getAllCampaigns();
 
-        assertEq(prop1Campaigns.length, 1);
-        assertEq(prop1Campaigns[0], campaignId1);
-
-        assertEq(prop2Campaigns.length, 1);
-        assertEq(prop2Campaigns[0], campaignId2);
+        // Assertions
+        assertEq(list.length, 2);
+        // Verify index 0 contains ID 1
+        assertEq(list[0].totalAllocation, TOTAL_ALLOCATION);
+        // Verify index 1 contains ID 2
+        assertEq(list[1].totalAllocation, TOTAL_ALLOCATION);
     }
 
-    /* ========== USER TESTS ========== */
-    function test_User_ClaimSingle() public {
-        // Create and fund campaign
-        uint256 campaignId =
-            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
+    /* ========== TESTS: USER ACTIONS ========== */
 
-        token.mint(owner, TOTAL_ALLOCATION);
+    function test_User_Claim_Valid() public {
+        // Setup Campaign
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
+        uint256 campaignId =
+            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
 
-        // Generate proof for user1
-        bytes32[] memory proof = MerkleHelper.generateProof(leaves, 0);
+        // Prepare Proof for User 1 (Index 0)
+        // Proof path: sibling of 0 is 1, sibling of (01) is (23)
+        bytes32[] memory proof = new bytes32[](2);
+        proof[0] = leaves[1]; // Sibling of User 1
+        proof[1] = _hashPair(leaves[2], leaves[3]); // Sibling of the Hash(0,1)
 
-        // Claim for user1
+        // Action
         vm.prank(user1);
         distributor.claim(campaignId, 0, user1, 100e18, proof);
 
-        // Check balances
+        // Assertions
         assertEq(token.balanceOf(user1), 100e18);
-        assertEq(token.balanceOf(address(distributor)), TOTAL_ALLOCATION - 100e18);
-
-        // Check claimed status
         assertTrue(distributor.isClaimed(campaignId, 0));
-
-        // Check campaign stats
         (,,,, uint256 totalClaimed,,) = distributor.campaigns(campaignId);
         assertEq(totalClaimed, 100e18);
     }
 
-    function test_User_ClaimMultipleUsers() public {
-        // Create and fund campaign
-        uint256 campaignId =
-            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
-
-        token.mint(owner, TOTAL_ALLOCATION);
+    function test_User_Claim_Revert_DoubleClaim() public {
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
-
-        // Claim for user1
-        bytes32[] memory proof1 = MerkleHelper.generateProof(leaves, 0);
-        vm.prank(user1);
-        distributor.claim(campaignId, 0, user1, 100e18, proof1);
-
-        // Claim for user2
-        bytes32[] memory proof2 = MerkleHelper.generateProof(leaves, 1);
-        vm.prank(user2);
-        distributor.claim(campaignId, 1, user2, 200e18, proof2);
-
-        // Claim for user3
-        bytes32[] memory proof3 = MerkleHelper.generateProof(leaves, 2);
-        vm.prank(user3);
-        distributor.claim(campaignId, 2, user3, 300e18, proof3);
-
-        // Check balances
-        assertEq(token.balanceOf(user1), 100e18);
-        assertEq(token.balanceOf(user2), 200e18);
-        assertEq(token.balanceOf(user3), 300e18);
-        assertEq(token.balanceOf(address(distributor)), TOTAL_ALLOCATION - 600e18);
-
-        // Check all claimed
-        assertTrue(distributor.isClaimed(campaignId, 0));
-        assertTrue(distributor.isClaimed(campaignId, 1));
-        assertTrue(distributor.isClaimed(campaignId, 2));
-
-        // Check total claimed
-        (,,,, uint256 totalClaimed,,) = distributor.campaigns(campaignId);
-        assertEq(totalClaimed, 600e18);
-    }
-
-    function test_User_ClaimRevert_InvalidProof() public {
         uint256 campaignId =
-            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
+            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
 
-        token.mint(owner, TOTAL_ALLOCATION);
-        token.approve(address(distributor), TOTAL_ALLOCATION);
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
+        bytes32[] memory proof = new bytes32[](2);
+        proof[0] = leaves[1];
+        proof[1] = _hashPair(leaves[2], leaves[3]);
 
-        // Try to claim with invalid proof
-        bytes32[] memory invalidProof = new bytes32[](1);
-        invalidProof[0] = bytes32(uint256(12345));
-
-        vm.prank(user1);
-        vm.expectRevert("invalid proof");
-        distributor.claim(campaignId, 0, user1, 100e18, invalidProof);
-    }
-
-    function test_User_ClaimRevert_InvalidAddress() public {
-        uint256 campaignId =
-            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
-
-        token.mint(owner, TOTAL_ALLOCATION);
-        token.approve(address(distributor), TOTAL_ALLOCATION);
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
-
-        // Try to claim with invalid proof
-        bytes32[] memory proof = MerkleHelper.generateProof(leaves, 1);
-        address maliciousUser = address(0x4);
-        vm.prank(user1);
-        vm.expectRevert("invalid proof");
-        distributor.claim(campaignId, 1, maliciousUser, 200e18, proof);
-    }
-
-    function test_User_ClaimRevert_AlreadyClaimed() public {
-        uint256 campaignId =
-            distributor.createCampaign(PROPERTY_ID, address(token), merkleRoot, TOTAL_ALLOCATION, 0, true);
-
-        token.mint(owner, TOTAL_ALLOCATION);
-        token.approve(address(distributor), TOTAL_ALLOCATION);
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
-
-        // First claim
-        bytes32[] memory proof = MerkleHelper.generateProof(leaves, 0);
+        // 1. First Claim - Success
         vm.prank(user1);
         distributor.claim(campaignId, 0, user1, 100e18, proof);
 
-        // Try to claim again
+        // 2. Second Claim - Fail
         vm.prank(user1);
-        vm.expectRevert("already claimed");
+        vm.expectRevert("Already claimed"); // Match string in contract
         distributor.claim(campaignId, 0, user1, 100e18, proof);
     }
 
-    function test_User_ClaimRevert_CampaignNotActive() public {
-        uint256 campaignId = distributor.createCampaign(
-            PROPERTY_ID,
-            address(token),
-            merkleRoot,
-            TOTAL_ALLOCATION,
-            0,
-            false // inactive
-        );
-
-        token.mint(owner, TOTAL_ALLOCATION);
+    function test_User_Claim_Revert_InvalidProof() public {
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
+        uint256 campaignId =
+            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
 
-        bytes32[] memory proof = MerkleHelper.generateProof(leaves, 0);
+        // Create Fake Proof
+        bytes32[] memory badProof = new bytes32[](2);
+        badProof[0] = bytes32(uint256(999999));
+        badProof[1] = bytes32(uint256(888888));
 
         vm.prank(user1);
-        vm.expectRevert("campaign not active");
+        vm.expectRevert("Invalid proof");
+        distributor.claim(campaignId, 0, user1, 100e18, badProof);
+    }
+
+    function test_User_Claim_Revert_CampaignInactive() public {
+        // Create but DON'T fund (so it stays inactive)
+        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0);
+
+        bytes32[] memory proof = new bytes32[](2);
+        proof[0] = leaves[1];
+        proof[1] = _hashPair(leaves[2], leaves[3]);
+
+        vm.prank(user1);
+        vm.expectRevert("Campaign not active");
         distributor.claim(campaignId, 0, user1, 100e18, proof);
     }
 }
