@@ -8,13 +8,13 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 
 /**
- * @title ReferalRewardsDistributor
+ * @title ReferralRewardsDistributor
  * @notice
  *  - Admin can register multiple campaigns.
  *  - Strictly for ERC20 tokens .
  *  - Includes two function to create campaigns, function createCampaign and fundCampaign for create and fund later one for combined "createAndFundCampaign" function for efficiency.
  */
-contract ReferalRewardsDistributor is Ownable, ReentrancyGuard {
+contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using MerkleProof for bytes32[];
 

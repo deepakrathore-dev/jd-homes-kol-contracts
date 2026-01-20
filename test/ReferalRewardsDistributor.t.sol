@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Test, console} from "forge-std/Test.sol";
-import {ReferalRewardsDistributor} from "../src/ReferalRewardsDistributor.sol";
+import {ReferralRewardsDistributor} from "../src/ReferralRewardsDistributor.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 //  Simple Mock Token for testing
@@ -12,8 +12,8 @@ contract MockERC20 is ERC20 {
     }
 }
 
-contract ReferalRewardsDistributorTest is Test {
-    ReferalRewardsDistributor public distributor;
+contract ReferralRewardsDistributorTest is Test {
+    ReferralRewardsDistributor public distributor;
     MockERC20 public token;
 
     address public owner;
@@ -34,7 +34,7 @@ contract ReferalRewardsDistributorTest is Test {
         user3 = address(0x3);
 
         // Deploy contracts
-        distributor = new ReferalRewardsDistributor();
+        distributor = new ReferralRewardsDistributor();
         token = new MockERC20();
 
         // ----------------------------------------------------
@@ -178,7 +178,7 @@ contract ReferalRewardsDistributorTest is Test {
         distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
 
         // Call the view function
-        ReferalRewardsDistributor.Campaign[] memory list = distributor.getAllCampaigns();
+        ReferralRewardsDistributor.Campaign[] memory list = distributor.getAllCampaigns();
 
         // Assertions
         assertEq(list.length, 2);
