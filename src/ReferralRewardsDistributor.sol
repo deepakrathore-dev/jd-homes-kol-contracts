@@ -11,7 +11,6 @@ import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
  * @title ReferralRewardsDistributor
  * @notice
  *  - Admin can register multiple campaigns.
- *  - Strictly for ERC20 tokens .
  *  - Includes two function to create campaigns, function createCampaign and fundCampaign for create and fund later one for combined "createAndFundCampaign" function for efficiency.
  */
 contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
@@ -24,7 +23,6 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
         uint256 totalAllocation; // Expected total allocation
         uint256 totalFunded; // Actual funded amount
         uint256 totalClaimed; // Amount claimed
-        uint256 expiry; // Timestamp (0 = no expiry)
         bool active; // Is campaign open for claims
     }
 
@@ -35,12 +33,10 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     // claimed bitmap: campaignId => wordIndex => bits
     mapping(uint256 => mapping(uint256 => uint256)) private claimedBitMap;
 
-    event CampaignCreated(
-        uint256 indexed campaignId, address token, bytes32 merkleRoot, uint256 totalAllocation, uint256 expiry
-    );
+    event CampaignCreated(uint256 indexed campaignId, address token, bytes32 merkleRoot, uint256 totalAllocation);
     event CampaignFunded(uint256 indexed campaignId, address indexed token, uint256 amount, uint256 totalFunded);
     event Claimed(uint256 indexed campaignId, uint256 indexed index, address indexed account, uint256 amount);
-    event CampaignClosed(uint256 indexed campaignId);
+    event CampaignStatusChanged(uint256 indexed campaignId, bool active);
     event UnclaimedWithdrawn(uint256 indexed campaignId, address indexed to, uint256 amount);
 
     constructor() Ownable(msg.sender) {
@@ -52,13 +48,14 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     /**
      * @notice Create a campaign without funding it yet.
      */
-    function createCampaign(address token, bytes32 merkleRoot, uint256 totalAllocation, uint256 expiry)
+    function createCampaign(address token, bytes32 merkleRoot, uint256 totalAllocation)
         public
         onlyOwner
         returns (uint256)
     {
         require(token != address(0), "Invalid token address");
         require(merkleRoot != bytes32(0), "Zero merkle root");
+        require(totalAllocation > 0, "Zero total allocation");
 
         uint256 id = nextCampaignId++;
         campaigns[id] = Campaign({
@@ -67,11 +64,10 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
             totalAllocation: totalAllocation,
             totalFunded: 0,
             totalClaimed: 0,
-            expiry: expiry,
             active: false
         });
 
-        emit CampaignCreated(id, token, merkleRoot, totalAllocation, expiry);
+        emit CampaignCreated(id, token, merkleRoot, totalAllocation);
         return id;
     }
 
@@ -79,36 +75,38 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
      * @notice Fund an existing campaign.
      * @dev Requires prior ERC20 approval.
      */
-    function fundCampaign(uint256 campaignId, uint256 amount) public onlyOwner nonReentrant {
+    function fundCampaign(uint256 campaignId) public onlyOwner nonReentrant {
         Campaign storage c = campaigns[campaignId];
-        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
-        require(amount > 0, "Zero amount");
 
-        // Transfer tokens from admin to contract
+        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
+        require(!c.active, "Campaign already funded");
+        require(c.totalFunded == 0, "Already funded");
+
+        uint256 amount = c.totalAllocation;
+        require(amount > 0, "Zero allocation");
+
         IERC20(c.token).safeTransferFrom(msg.sender, address(this), amount);
 
-        c.totalFunded += amount;
-        c.active = true; // Auto-activate on funding
+        c.totalFunded = amount;
+        c.active = true;
 
-        emit CampaignFunded(campaignId, c.token, amount, c.totalFunded);
+        emit CampaignFunded(campaignId, c.token, amount, amount);
     }
 
     /**
      * @notice COMBINED APPROACH: Create and Fund in one call.
      * @dev This is the efficient approach. Requires prior ERC20 approval.
      */
-    function createAndFundCampaign(
-        address token,
-        bytes32 merkleRoot,
-        uint256 totalAllocation,
-        uint256 expiry,
-        uint256 fundingAmount
-    ) external onlyOwner returns (uint256) {
+    function createAndFundCampaign(address token, bytes32 merkleRoot, uint256 totalAllocation)
+        external
+        onlyOwner
+        returns (uint256)
+    {
         // 1. Create
-        uint256 id = createCampaign(token, merkleRoot, totalAllocation, expiry);
+        uint256 id = createCampaign(token, merkleRoot, totalAllocation);
 
         // 2. Fund
-        fundCampaign(id, fundingAmount);
+        fundCampaign(id);
 
         return id;
     }
@@ -120,18 +118,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
         Campaign storage c = campaigns[campaignId];
         require(c.merkleRoot != bytes32(0), "Campaign does not exist");
         c.active = active;
-        if (!active) emit CampaignClosed(campaignId);
-    }
-
-    /**
-     * @notice Update merkle root.
-     * WARNING: Does NOT reset claimed bitmap.
-     */
-    function updateMerkleRoot(uint256 campaignId, bytes32 newRoot) external onlyOwner {
-        Campaign storage c = campaigns[campaignId];
-        require(c.merkleRoot != bytes32(0), "Campaign does not exist");
-        require(newRoot != bytes32(0), "Zero root");
-        c.merkleRoot = newRoot;
+        if (!active) emit CampaignStatusChanged(campaignId, active);
     }
 
     /* ========== USER ACTIONS ========== */
@@ -148,6 +135,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
         require(c.active, "Campaign not active");
         require(!isClaimed(campaignId, index), "Already claimed");
         require(amount > 0, "Zero amount");
+        require(c.totalClaimed + amount <= c.totalFunded, "Insufficient campaign funds");
 
         // Verify Merkle Proof
         bytes32 node = keccak256(abi.encodePacked(index, account, amount));
@@ -199,16 +187,12 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     /* ========== ADMIN WITHDRAWALS ========== */
 
     /**
-     * @notice Withdraw unclaimed funds after expiry.
+     * @notice Withdraw unclaimed funds .
      */
     function withdrawUnclaimed(uint256 campaignId, address to, uint256 amount) external onlyOwner nonReentrant {
         Campaign storage c = campaigns[campaignId];
         require(c.merkleRoot != bytes32(0), "Campaign does not exist");
-
-        // Allow withdrawal if expired OR if admin manually set active = false
-        if (c.active) {
-            require(c.expiry != 0 && block.timestamp > c.expiry, "Campaign active and not expired");
-        }
+        require(!c.active, "Campaign not active");
 
         uint256 available = c.totalFunded - c.totalClaimed;
         require(available >= amount, "Insufficient unclaimed balance");

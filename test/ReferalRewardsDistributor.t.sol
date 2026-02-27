@@ -63,12 +63,7 @@ contract ReferralRewardsDistributorTest is Test {
     /* ========== TESTS: ADMIN ACTIONS ========== */
 
     function test_Admin_CreateCampaign_Separate() public {
-        uint256 campaignId = distributor.createCampaign(
-            address(token),
-            merkleRoot,
-            TOTAL_ALLOCATION,
-            0 // no expiry
-        );
+        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         assertEq(campaignId, 1);
 
@@ -79,7 +74,6 @@ contract ReferralRewardsDistributorTest is Test {
             uint256 totalAlloc,
             uint256 totalFunded,
             uint256 totalClaimed,
-            uint256 expiry,
             bool active
         ) = distributor.campaigns(campaignId);
 
@@ -88,21 +82,20 @@ contract ReferralRewardsDistributorTest is Test {
         assertEq(totalAlloc, TOTAL_ALLOCATION);
         assertEq(totalFunded, 0); // Not funded yet
         assertEq(totalClaimed, 0);
-        assertEq(expiry, 0);
         assertFalse(active); // Not active yet
     }
 
     function test_Admin_FundCampaign() public {
         // 1. Create
-        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0);
+        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         // 2. Approve
         token.approve(address(distributor), TOTAL_ALLOCATION);
 
         // 3. Fund
-        distributor.fundCampaign(campaignId, TOTAL_ALLOCATION);
+        distributor.fundCampaign(campaignId);
 
-        (,,, uint256 totalFunded,,, bool active) = distributor.campaigns(campaignId);
+        (,,, uint256 totalFunded,, bool active) = distributor.campaigns(campaignId);
 
         assertEq(totalFunded, TOTAL_ALLOCATION);
         assertTrue(active); // Should auto-activate
@@ -115,16 +108,10 @@ contract ReferralRewardsDistributorTest is Test {
         token.approve(address(distributor), TOTAL_ALLOCATION);
 
         // 2. Call the combined function
-        uint256 campaignId = distributor.createAndFundCampaign(
-            address(token),
-            merkleRoot,
-            TOTAL_ALLOCATION,
-            0,
-            TOTAL_ALLOCATION // Funding amount
-        );
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         // 3. Verify everything happened in one go
-        (,,, uint256 totalFunded,,, bool active) = distributor.campaigns(campaignId);
+        (,,, uint256 totalFunded,, bool active) = distributor.campaigns(campaignId);
 
         assertEq(campaignId, 1);
         assertEq(totalFunded, TOTAL_ALLOCATION);
@@ -135,30 +122,26 @@ contract ReferralRewardsDistributorTest is Test {
     function test_Admin_UpdateCampaignStatus() public {
         // Create & Fund
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        uint256 campaignId =
-            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         // Deactivate
         distributor.updateCampaignStatus(campaignId, false);
-        (,,,,,, bool active) = distributor.campaigns(campaignId);
+        (,,,,, bool active) = distributor.campaigns(campaignId);
         assertFalse(active);
 
         // Activate
         distributor.updateCampaignStatus(campaignId, true);
-        (,,,,,, active) = distributor.campaigns(campaignId);
+        (,,,,, active) = distributor.campaigns(campaignId);
         assertTrue(active);
     }
 
     function test_Admin_WithdrawUnclaimed() public {
-        uint256 expiry = block.timestamp + 1 days;
-
         // Create & Fund
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        uint256 campaignId =
-            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, expiry, TOTAL_ALLOCATION);
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
-        // Fast forward past expiry
-        vm.warp(expiry + 1);
+        // Deactivate campaign so withdrawUnclaimed is allowed
+        distributor.updateCampaignStatus(campaignId, false);
 
         // Withdraw all (since none claimed)
         uint256 balanceBefore = token.balanceOf(owner);
@@ -173,9 +156,9 @@ contract ReferralRewardsDistributorTest is Test {
         token.approve(address(distributor), TOTAL_ALLOCATION * 10);
 
         // Create Campaign 1
-        distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
+        distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
         // Create Campaign 2
-        distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
+        distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         // Call the view function
         ReferralRewardsDistributor.Campaign[] memory list = distributor.getAllCampaigns();
@@ -193,8 +176,7 @@ contract ReferralRewardsDistributorTest is Test {
     function test_User_Claim_Valid() public {
         // Setup Campaign
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        uint256 campaignId =
-            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         // Prepare Proof for User 1 (Index 0)
         // Proof path: sibling of 0 is 1, sibling of (01) is (23)
@@ -209,14 +191,13 @@ contract ReferralRewardsDistributorTest is Test {
         // Assertions
         assertEq(token.balanceOf(user1), 100e18);
         assertTrue(distributor.isClaimed(campaignId, 0));
-        (,,,, uint256 totalClaimed,,) = distributor.campaigns(campaignId);
+        (,,,, uint256 totalClaimed,) = distributor.campaigns(campaignId);
         assertEq(totalClaimed, 100e18);
     }
 
     function test_User_Claim_Revert_DoubleClaim() public {
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        uint256 campaignId =
-            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         bytes32[] memory proof = new bytes32[](2);
         proof[0] = leaves[1];
@@ -234,8 +215,7 @@ contract ReferralRewardsDistributorTest is Test {
 
     function test_User_Claim_Revert_InvalidProof() public {
         token.approve(address(distributor), TOTAL_ALLOCATION);
-        uint256 campaignId =
-            distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0, TOTAL_ALLOCATION);
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         // Create Fake Proof
         bytes32[] memory badProof = new bytes32[](2);
@@ -249,7 +229,7 @@ contract ReferralRewardsDistributorTest is Test {
 
     function test_User_Claim_Revert_CampaignInactive() public {
         // Create but DON'T fund (so it stays inactive)
-        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION, 0);
+        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
 
         bytes32[] memory proof = new bytes32[](2);
         proof[0] = leaves[1];
