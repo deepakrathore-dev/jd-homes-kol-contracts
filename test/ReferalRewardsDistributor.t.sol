@@ -3,7 +3,9 @@ pragma solidity ^0.8.20;
 
 import {Test, console} from "forge-std/Test.sol";
 import {ReferralRewardsDistributor} from "../src/ReferralRewardsDistributor.sol";
+import {AccessRoleManager} from "../src/AccessRoleManager.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 //  Simple Mock Token for testing
 contract MockERC20 is ERC20 {
@@ -14,9 +16,12 @@ contract MockERC20 is ERC20 {
 
 contract ReferralRewardsDistributorTest is Test {
     ReferralRewardsDistributor public distributor;
+    AccessRoleManager public accessManager;
     MockERC20 public token;
 
     address public owner;
+    address public manager;
+    address public stranger;
     address public user1;
     address public user2;
     address public user3;
@@ -29,12 +34,15 @@ contract ReferralRewardsDistributorTest is Test {
 
     function setUp() public {
         owner = address(this);
+        manager = address(0x4);
+        stranger = address(0x5);
         user1 = address(0x1);
         user2 = address(0x2);
         user3 = address(0x3);
 
-        // Deploy contracts
-        distributor = new ReferralRewardsDistributor();
+        // Deploy contracts: access manager owned by this test, then distributor pointed at it.
+        accessManager = new AccessRoleManager(owner);
+        distributor = new ReferralRewardsDistributor(address(accessManager));
         token = new MockERC20();
 
         // ----------------------------------------------------
@@ -238,5 +246,87 @@ contract ReferralRewardsDistributorTest is Test {
         vm.prank(user1);
         vm.expectRevert("Campaign not active");
         distributor.claim(campaignId, 0, user1, 100e18, proof);
+    }
+
+    /* ========== TESTS: ACCESS CONTROL ========== */
+
+    function test_Access_OwnerIsCampaignManager() public view {
+        assertTrue(accessManager.canManageCampaigns(owner));
+    }
+
+    function test_Access_GrantedManager_CanCreateAndFund() public {
+        // Owner grants manager rights.
+        accessManager.grantManager(manager);
+        assertTrue(accessManager.canManageCampaigns(manager));
+
+        // Fund the manager with tokens and approve the distributor.
+        token.transfer(manager, TOTAL_ALLOCATION);
+        vm.prank(manager);
+        token.approve(address(distributor), TOTAL_ALLOCATION);
+
+        // Manager can create + fund.
+        vm.prank(manager);
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
+
+        (,,, uint256 totalFunded,, bool active) = distributor.campaigns(campaignId);
+        assertEq(totalFunded, TOTAL_ALLOCATION);
+        assertTrue(active);
+    }
+
+    function test_Access_Stranger_CannotCreateCampaign() public {
+        vm.prank(stranger);
+        vm.expectRevert("Not authorized: campaign manager");
+        distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
+    }
+
+    function test_Access_Stranger_CannotFundCampaign() public {
+        uint256 campaignId = distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
+
+        vm.prank(stranger);
+        vm.expectRevert("Not authorized: campaign manager");
+        distributor.fundCampaign(campaignId);
+    }
+
+    function test_Access_RevokedManager_CannotCreate() public {
+        accessManager.grantManager(manager);
+        accessManager.revokeManager(manager);
+        assertFalse(accessManager.canManageCampaigns(manager));
+
+        vm.prank(manager);
+        vm.expectRevert("Not authorized: campaign manager");
+        distributor.createCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
+    }
+
+    function test_Access_Manager_CannotDoAdminActions() public {
+        // A campaign manager may create/fund, but not run admin-only actions.
+        accessManager.grantManager(manager);
+        token.approve(address(distributor), TOTAL_ALLOCATION);
+        uint256 campaignId = distributor.createAndFundCampaign(address(token), merkleRoot, TOTAL_ALLOCATION);
+
+        vm.prank(manager);
+        vm.expectRevert("Not authorized: admin only");
+        distributor.updateCampaignStatus(campaignId, false);
+
+        vm.prank(manager);
+        vm.expectRevert("Not authorized: admin only");
+        distributor.withdrawUnclaimed(campaignId, manager, 1);
+
+        vm.prank(manager);
+        vm.expectRevert("Not authorized: admin only");
+        distributor.emergencyRecoverERC20(address(token), 1);
+    }
+
+    function test_Access_OnlyOwner_CanGrantManager() public {
+        vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        accessManager.grantManager(manager);
+    }
+
+    function test_Access_EmergencyRecover_SendsToAdmin() public {
+        token.transfer(address(distributor), 500e18);
+
+        uint256 balanceBefore = token.balanceOf(owner);
+        distributor.emergencyRecoverERC20(address(token), 500e18);
+        assertEq(token.balanceOf(owner) - balanceBefore, 500e18);
     }
 }
