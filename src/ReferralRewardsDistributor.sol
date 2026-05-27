@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
+import {AccessRoleManager} from "./AccessRoleManager.sol";
 
 /**
  * @title ReferralRewardsDistributor
  * @notice
- *  - Admin can register multiple campaigns.
+ *  - Admin (the AccessRoleManager owner) can register multiple campaigns and run all admin actions.
+ *  - Authorized campaign managers (granted via the AccessRoleManager) may also create and fund campaigns.
  *  - Includes two function to create campaigns, function createCampaign and fundCampaign for create and fund later one for combined "createAndFundCampaign" function for efficiency.
  */
-contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
+contract ReferralRewardsDistributor is ReentrancyGuard {
     using SafeERC20 for IERC20;
     using MerkleProof for bytes32[];
+
+    // External access-control registry: owner = admin, plus authorized campaign managers.
+    AccessRoleManager public immutable accessManager;
 
     struct Campaign {
         address token; // ERC20 token address
@@ -39,8 +43,24 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     event CampaignStatusChanged(uint256 indexed campaignId, bool active);
     event UnclaimedWithdrawn(uint256 indexed campaignId, address indexed to, uint256 amount);
 
-    constructor() Ownable(msg.sender) {
+    constructor(address accessManager_) {
+        require(accessManager_ != address(0), "Invalid access manager");
+        accessManager = AccessRoleManager(accessManager_);
         nextCampaignId = 1;
+    }
+
+    /* ========== ACCESS MODIFIERS ========== */
+
+    /// @notice Restricts to the AccessRoleManager owner (full admin).
+    modifier onlyAdmin() {
+        require(msg.sender == accessManager.owner(), "Not authorized: admin only");
+        _;
+    }
+
+    /// @notice Restricts to the admin or an authorized campaign manager.
+    modifier onlyCampaignManager() {
+        require(accessManager.canManageCampaigns(msg.sender), "Not authorized: campaign manager");
+        _;
     }
 
     /* ========== ADMIN ACTIONS ========== */
@@ -50,7 +70,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
      */
     function createCampaign(address token, bytes32 merkleRoot, uint256 totalAllocation)
         public
-        onlyOwner
+        onlyCampaignManager
         returns (uint256)
     {
         require(token != address(0), "Invalid token address");
@@ -75,7 +95,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
      * @notice Fund an existing campaign.
      * @dev Requires prior ERC20 approval.
      */
-    function fundCampaign(uint256 campaignId) public onlyOwner nonReentrant {
+    function fundCampaign(uint256 campaignId) public onlyCampaignManager nonReentrant {
         Campaign storage c = campaigns[campaignId];
 
         require(c.merkleRoot != bytes32(0), "Campaign does not exist");
@@ -99,7 +119,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
      */
     function createAndFundCampaign(address token, bytes32 merkleRoot, uint256 totalAllocation)
         external
-        onlyOwner
+        onlyCampaignManager
         returns (uint256)
     {
         // 1. Create
@@ -114,7 +134,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     /**
      * @notice Manually toggle campaign status.
      */
-    function updateCampaignStatus(uint256 campaignId, bool active) external onlyOwner {
+    function updateCampaignStatus(uint256 campaignId, bool active) external onlyAdmin {
         Campaign storage c = campaigns[campaignId];
         require(c.merkleRoot != bytes32(0), "Campaign does not exist");
         c.active = active;
@@ -189,7 +209,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     /**
      * @notice Withdraw unclaimed funds .
      */
-    function withdrawUnclaimed(uint256 campaignId, address to, uint256 amount) external onlyOwner nonReentrant {
+    function withdrawUnclaimed(uint256 campaignId, address to, uint256 amount) external onlyAdmin nonReentrant {
         Campaign storage c = campaigns[campaignId];
         require(c.merkleRoot != bytes32(0), "Campaign does not exist");
         require(!c.active, "Campaign not active");
@@ -206,7 +226,7 @@ contract ReferralRewardsDistributor is Ownable, ReentrancyGuard {
     /**
      * @notice Emergency recover any ERC20 (including campaign tokens if absolutely needed).
      */
-    function emergencyRecoverERC20(address tokenAddress, uint256 tokenAmount) external onlyOwner {
-        IERC20(tokenAddress).safeTransfer(owner(), tokenAmount);
+    function emergencyRecoverERC20(address tokenAddress, uint256 tokenAmount) external onlyAdmin {
+        IERC20(tokenAddress).safeTransfer(accessManager.owner(), tokenAmount);
     }
 }
